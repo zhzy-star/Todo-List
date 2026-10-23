@@ -55,7 +55,33 @@ public sealed partial class PaperWindow : Window
     internal bool IsNativeMicaEffective => _nativeMica?.IsActive == true;
     // Stable for the session, including solid/opacity fallback; no inset frame may reappear
     // just because a startup animation temporarily suspends the material.
-    private bool UsesNativePaperChrome => _controller.UsesNativeMicaWindows && !_paper.IsCollapsed;
+    private bool UsesNativePaperChrome => _controller.UsesNativeMicaWindows && !IsEffectivelyCollapsed;
+
+    // ===== 【新增功能：启动强制显示展开待办面板】=====
+    // 应用启动时强制 Todo 纸片以"展开的待办面板"形态显示（含每日任务/限时任务区块），
+    // 仅本次会话生效：不调用 SetCollapsedState、不修改 _paper.IsCollapsed / _paper.IsVisible
+    // 的持久化值，因此不会写回 data.json，用户下次启动仍按自己保存的偏好恢复。
+    private bool _startupForceExpandedTodo;
+    // 启动强制展开期间的一次性几何保存守卫：Loaded 首次保存时跳过写回。
+    private bool _startupGeometryGuardActive;
+
+    /// <summary>由 AppController 在启动恢复路径调用（仅内存标志，一次性会话覆盖）。</summary>
+    public void EnableStartupForceExpandedTodo()
+    {
+        _startupForceExpandedTodo = true;
+        _startupGeometryGuardActive = true;
+    }
+
+    /// <summary>
+    /// 有效折叠状态：启动强制展开的 Todo 纸片临时视为"未折叠"（展开形态），
+    /// 其余情况与持久化 _paper.IsCollapsed 一致。所有窗口形态判定统一走此属性。
+    /// </summary>
+    private bool IsEffectivelyCollapsed =>
+        _paper.IsCollapsed && !(_startupForceExpandedTodo && _paper.Type == PaperTypes.Todo);
+
+    /// <summary>启动强制展开的 Todo 纸片为激活目标（用于启动恢复时的窗口激活选择）。</summary>
+    internal bool IsStartupForceExpandedTodo =>
+        _startupForceExpandedTodo && _paper.Type == PaperTypes.Todo;
 
     private Grid _windowHost = null!;
     private PaperChromeBorder _paperChrome = null!;
@@ -207,7 +233,7 @@ public sealed partial class PaperWindow : Window
     private const double RadiusBlock = 12;
     private const double RadiusShell = 16;
 
-    public bool IsDeepCapsulePlaced => _paper.IsCollapsed && HasDeepCapsuleSlotPlacement;
+    public bool IsDeepCapsulePlaced => IsEffectivelyCollapsed && HasDeepCapsuleSlotPlacement;
     internal bool IsShellBuilt => _isShellBuilt;
     public bool IsDeepCapsuleSlotVisible => _edgeCapsuleHost?.IsVisible == true;
     public bool HasVisibleSurface =>
@@ -217,7 +243,7 @@ public sealed partial class PaperWindow : Window
     public bool HasExpandedPaperSurface =>
         IsVisible &&
         WindowState != WindowState.Minimized &&
-        !_paper.IsCollapsed;
+        !IsEffectivelyCollapsed;
     public bool IsCollapseAllRetracted => IsDeepCapsuleRetractedIntoMaster;
     public bool HasExpandedDeepCapsuleSlotReservation => EdgeCapsuleSlot is
         EdgeCapsuleSlotState.ExpandedReserved or
@@ -234,7 +260,7 @@ public sealed partial class PaperWindow : Window
     // Ordinary collapsed capsules are the main PaperWindow and should still save X/Y.
     // Deep capsules use the slot-host window for docked geometry, so the hidden/parked
     // main window must not overwrite ordinary paper geometry.
-    public bool UsesNonPaperGeometry => _paper.IsCollapsed && HasDeepCapsuleSlotPlacement;
+    public bool UsesNonPaperGeometry => IsEffectivelyCollapsed && HasDeepCapsuleSlotPlacement;
     public bool ShouldSaveDeepCapsuleExpandedGeometry => ExpandedFromDeepCapsuleEdge && !_paper.IsCollapsed && _paper.IsVisible;
     public double DesiredCapsuleWindowWidth => CapsuleWindowWidth();
     public double DeepCapsuleRestingVisibleWidth => HoldsDeepCapsuleSlotWhileExpanded
@@ -683,10 +709,15 @@ public sealed partial class PaperWindow : Window
     public PaperWindow(
         PaperData paper,
         AppController controller,
-        bool deferShellConstruction = false)
+        bool deferShellConstruction = false,
+        bool startupForceExpandedTodo = false)
     {
         _paper = paper;
         _controller = controller;
+        // 【新增功能】启动强制展开：标志必须在 BuildShell（EnsureShellBuilt）之前就位，
+        // 否则胶囊 shell / 展开 shell 的初始可见性已按持久化折叠态构建。
+        _startupForceExpandedTodo = startupForceExpandedTodo;
+        _startupGeometryGuardActive = startupForceExpandedTodo;
         _edgeCapsule.DiagnosticId =
             EdgeCapsulePerformanceDiagnostics.ShortId(paper.Id);
         _deepCapsuleContextMenuSession = new DeepCapsuleContextMenuSession(
@@ -699,7 +730,7 @@ public sealed partial class PaperWindow : Window
         if (_controller.UsesNativeMicaWindows)
         {
             _nativeMica = new NativeMicaBackdrop(this, () => _paperChrome,
-                () => !_paper.IsCollapsed && !IsPaperFormTransitioning,
+                () => !IsEffectivelyCollapsed && !IsPaperFormTransitioning,
                 brush => Resources["PaperSurfaceBrushKey"] = brush);
             RefreshNativeMica();
         }
@@ -728,11 +759,16 @@ public sealed partial class PaperWindow : Window
         StateChanged += (_, _) =>
         {
             RefreshSnappedPresentation(forceApply: true);
+            // 【新增功能】任何路径进入最小化状态都收至系统托盘（后台常驻）
+            if (WindowState == WindowState.Minimized && !_isClosingForReal)
+            {
+                HideToTray();
+            }
             if (_paper.Type == PaperTypes.Note)
             {
                 NotifyCurrentPaperBodyVisibility(
                     _paper.IsVisible &&
-                    !_paper.IsCollapsed &&
+                    !IsEffectivelyCollapsed &&
                     WindowState != WindowState.Minimized &&
                     IsVisible);
             }
@@ -901,13 +937,13 @@ public sealed partial class PaperWindow : Window
     {
         return !_controller.State.HidePapersFromWindowSwitcher &&
             !_controller.State.HidePapersFromTaskbar &&
-            !(collapsed ?? _paper.IsCollapsed);
+            !(collapsed ?? IsEffectivelyCollapsed);
     }
 
     private bool TryGetPaperResizeHitTest(IntPtr hwnd, IntPtr lParam, out int hitTest)
     {
         hitTest = 0;
-        if (_paper.IsCollapsed ||
+        if (IsEffectivelyCollapsed ||
             _advancedInteractionLocked ||
             IsPaperFormTransitioning ||
             WindowState != WindowState.Normal ||
@@ -999,6 +1035,21 @@ public sealed partial class PaperWindow : Window
         return hitTest != 0;
     }
 
+    /// <summary>
+    /// 【新增功能】最小化时收至系统托盘：隐藏窗口，托盘图标常驻、后台运行。
+    /// 不修改 _paper.IsVisible 持久化配置，重启后仍按原可见性恢复。
+    /// </summary>
+    private void HideToTray()
+    {
+        if (IsClosed)
+        {
+            return;
+        }
+
+        Hide();
+        WindowState = WindowState.Normal;
+    }
+
     private IntPtr OnWindowMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         if (msg == WmNcHitTest && IsExperimentalPassive)
@@ -1007,10 +1058,13 @@ public sealed partial class PaperWindow : Window
             return new IntPtr(HtTransparent);
         }
 
-        // Keep restore/maximize on the default system path; only native minimization is blocked.
+        // ===== 【新增功能：最小化 → 收至系统托盘】=====
+        // 原项目直接拦截最小化；现改为隐藏窗口（托盘图标常驻、后台运行），
+        // 可从托盘菜单重新显示窗口或退出程序。restore/maximize 仍走默认系统路径。
         if (msg == WmSysCommand && (wParam.ToInt64() & SystemCommandMask) == ScMinimize)
         {
             handled = true;
+            HideToTray();
             return IntPtr.Zero;
         }
 
@@ -1116,7 +1170,7 @@ public sealed partial class PaperWindow : Window
             return;
         }
 
-        var snapped = !_paper.IsCollapsed &&
+        var snapped = !IsEffectivelyCollapsed &&
             !IsPaperFormTransitioning &&
             LooksSnappedNow();
 
@@ -1146,7 +1200,7 @@ public sealed partial class PaperWindow : Window
             return;
         }
 
-        if (IsVisible && !_paper.IsCollapsed && !IsPaperFormTransitioning)
+        if (IsVisible && !IsEffectivelyCollapsed && !IsPaperFormTransitioning)
         {
             _snappedPresentationBoundsForRestore = null;
         }
@@ -1168,8 +1222,8 @@ public sealed partial class PaperWindow : Window
             return;
         }
 
-        if (_paperChrome is SkinBorder skin) skin.IsCapsule = _paper.IsCollapsed && _controller.State.UseCapsuleMode;
-        var snappedExpanded = _isSnappedPresentation && !_paper.IsCollapsed;
+        if (_paperChrome is SkinBorder skin) skin.IsCapsule = IsEffectivelyCollapsed && _controller.State.UseCapsuleMode;
+        var snappedExpanded = _isSnappedPresentation && !IsEffectivelyCollapsed;
         if (_controller.UsesNativeMicaWindows && _topBarHost != null)
         {
             var innerRadius = snappedExpanded ? 0 : Math.Max(0, NativeMicaBackdrop.CornerRadius - _paperChrome.BorderThickness.Left);
@@ -1192,7 +1246,7 @@ public sealed partial class PaperWindow : Window
         }
 
         // Floating or capsule: restore shadow, margin, and form-appropriate corner radius.
-        var isCapsule = _paper.IsCollapsed && _controller.State.UseCapsuleMode;
+        var isCapsule = IsEffectivelyCollapsed && _controller.State.UseCapsuleMode;
         var targetCorner = PaperChromeCornerRadiusForState(isCapsule);
         _paperChrome.BeginAnimation(Border.MarginProperty, null);
         _paperChrome.Margin = new Thickness(UsesNativePaperChrome ? 0 : WindowChromeMargin);
@@ -1330,7 +1384,7 @@ public sealed partial class PaperWindow : Window
     internal bool TryGetSnappedPresentationBoundsForGeometrySave(out Rect bounds)
     {
         bounds = Rect.Empty;
-        if (!_paper.IsCollapsed &&
+        if (!IsEffectivelyCollapsed &&
             (_isSnappedPresentation || WindowState == WindowState.Maximized) &&
             TryGetCurrentSnapTileBounds(out bounds))
         {
@@ -1344,7 +1398,7 @@ public sealed partial class PaperWindow : Window
     internal bool TryGetRememberedSnapTileBoundsForRestore(out Rect bounds)
     {
         bounds = Rect.Empty;
-        if (_paper.IsCollapsed || _snappedPresentationBoundsForRestore is not Rect remembered)
+        if (IsEffectivelyCollapsed || _snappedPresentationBoundsForRestore is not Rect remembered)
         {
             return false;
         }
@@ -1358,7 +1412,7 @@ public sealed partial class PaperWindow : Window
 
     internal void RestoreSnapTilePresentation(Rect visibleTarget)
     {
-        if (_paper.IsCollapsed)
+        if (IsEffectivelyCollapsed)
         {
             return;
         }
@@ -1515,7 +1569,7 @@ public sealed partial class PaperWindow : Window
 
         if (IsDeepCapsuleSlotRetracting)
         {
-            if (!_paper.IsCollapsed &&
+            if (!IsEffectivelyCollapsed &&
                 _controller.State.UseCapsuleMode &&
                 _controller.State.UseDeepCapsuleMode &&
                 _edgeCapsuleHost?.IsVisible == true)
@@ -1543,7 +1597,7 @@ public sealed partial class PaperWindow : Window
         Left = _paper.X;
         Top = _paper.Y;
 
-        if (_paper.IsCollapsed && _controller.State.UseCapsuleMode)
+        if (IsEffectivelyCollapsed && _controller.State.UseCapsuleMode)
         {
             Width = CapsuleWindowWidth();
             Height = PaperLayoutDefaults.CapsuleHeight;
@@ -1576,10 +1630,15 @@ public sealed partial class PaperWindow : Window
     {
         Resources["SkinButtonRadiusKey"] = new CornerRadius(Theme.IsPixelSkin ? 0 : RadiusControl);
         Resources["SkinButtonPressedOffsetKey"] = new TranslateTransform(0, Theme.IsPixelSkin ? 1 : 0);
-        Resources["PaperBrushKey"] = PaperBrush;
+        // 【新增功能：卡片化】Todo 纸片窗口纸面用专用浅蓝白画刷（不用暖色纸皮肤），
+        // 笔记等其他纸片保持原 PaperBrush 不变。
+        var paperBrush = _paper.Type == PaperTypes.Todo
+            ? Theme.TodoPaperBrush
+            : PaperBrush;
+        Resources["PaperBrushKey"] = paperBrush;
         Resources["PaperSurfaceBrushKey"] = IsNativeMicaEffective
             ? NativeMicaBackdrop.GetActiveSurfaceBrush(PaperSkins.NativeBackdrop(Theme.Skin), Theme.IsDark)
-            : PaperBrush;
+            : paperBrush;
         Resources["PaperBorderBrushKey"] = PaperBorderBrush;
         Resources["TextBrushKey"] = TextBrush;
         Resources["WeakTextBrushKey"] = WeakTextBrush;
@@ -1594,10 +1653,12 @@ public sealed partial class PaperWindow : Window
         Resources["TitleBarDividerBrushKey"] = TitleBarDividerBrush;
 
         Resources["CheckBoxBorderBrushKey"] = CheckBoxBorderBrush;
-        Resources["CheckBoxActiveBrushKey"] = Theme.ActiveBrush;
-        Resources["CheckBoxUncheckedHoverBorderBrushKey"] = Theme.CheckBoxHoverBorderBrush;
-        Resources["CheckBoxUncheckedHoverBgKey"] = Theme.CheckBoxUncheckedHoverBgBrush;
-        Resources["CheckBoxActiveHoverBrushKey"] = Theme.CheckBoxActiveHoverBrush;
+        // 【新增功能：蓝色主题】复选框选中态用主蓝，未选悬停描边用主蓝悬停色，
+        // 未选悬停底用浅蓝底，已选悬停用主蓝悬停色（原为随配色族的 Active 系）。
+        Resources["CheckBoxActiveBrushKey"] = Theme.AccentBrush;
+        Resources["CheckBoxUncheckedHoverBorderBrushKey"] = Theme.AccentHoverBrush;
+        Resources["CheckBoxUncheckedHoverBgKey"] = Theme.AccentSubtleBrush;
+        Resources["CheckBoxActiveHoverBrushKey"] = Theme.AccentHoverBrush;
     }
 
     public void UpdateTheme()
@@ -1792,7 +1853,7 @@ public sealed partial class PaperWindow : Window
 
     private void ApplyCurrentCollapsedCapsuleWidth()
     {
-        if (!_paper.IsCollapsed || IsPaperFormTransitioning)
+        if (!IsEffectivelyCollapsed || IsPaperFormTransitioning)
         {
             return;
         }
@@ -1875,7 +1936,7 @@ public sealed partial class PaperWindow : Window
         _paperChrome = new SkinBorder
         {
             Margin = new Thickness(UsesNativePaperChrome ? 0 : WindowChromeMargin),
-            CornerRadius = PaperChromeCornerRadiusForState(_paper.IsCollapsed && _controller.State.UseCapsuleMode),
+            CornerRadius = PaperChromeCornerRadiusForState(IsEffectivelyCollapsed && _controller.State.UseCapsuleMode),
             BorderThickness = new Thickness(1),
             SnapsToDevicePixels = true,
             Effect = CreatePaperChromeShadow()
@@ -1931,7 +1992,7 @@ public sealed partial class PaperWindow : Window
         BuildCapsuleShell();
         AttachCapsuleShellToWindowHost();
 
-        if (_paper.IsCollapsed && _controller.State.UseCapsuleMode)
+        if (IsEffectivelyCollapsed && _controller.State.UseCapsuleMode)
         {
             _shell.Visibility = Visibility.Collapsed;
             _shell.Opacity = 0;
@@ -2409,7 +2470,7 @@ public sealed partial class PaperWindow : Window
         if (_updatingTopBarResponsiveLayout ||
             _topBar == null || _topBarTitleHost == null ||
             _topBarActionButtonsHost == null || _paperIconButton == null ||
-            _moreActionsButton == null || _closeButton == null || _paper.IsCollapsed)
+            _moreActionsButton == null || _closeButton == null || IsEffectivelyCollapsed)
             return;
 
         var availableWidth = _topBar.ActualWidth;
@@ -2599,7 +2660,7 @@ public sealed partial class PaperWindow : Window
         {
             NotifyCurrentPaperBodyVisibility(
                 _paper.IsVisible &&
-                !_paper.IsCollapsed &&
+                !IsEffectivelyCollapsed &&
                 WindowState != WindowState.Minimized);
             RefreshPaperBodyChrome();
         }
@@ -2715,7 +2776,7 @@ public sealed partial class PaperWindow : Window
 
         if (CanDisplayAsCapsule())
         {
-            menu.Items.Add(_paper.IsCollapsed
+            menu.Items.Add(IsEffectivelyCollapsed
                 ? MenuItem(Strings.Get("MenuRestoreWindow"), (_, _) => OpenCapsuleForEditing())
                 : MenuItem(Strings.Get("MenuCollapseToCapsule"), (_, _) => SetCollapsedState(true)));
         }
@@ -2754,7 +2815,7 @@ public sealed partial class PaperWindow : Window
         var shouldBeTopmost = !IsExperimentalPassive &&
             (_paper.AlwaysOnTop ||
              (_controller.State.UseCapsuleMode &&
-              _paper.IsCollapsed &&
+              IsEffectivelyCollapsed &&
               !UsesNonPaperGeometry));
         var fullscreenAvoidanceWindow =
             _controller.FullscreenAvoidanceWindowFor(this);
@@ -2936,7 +2997,7 @@ public sealed partial class PaperWindow : Window
     private bool CanBeginTitleEditNow()
     {
         return IsVisible &&
-            !_paper.IsCollapsed &&
+            !IsEffectivelyCollapsed &&
             !IsPaperFormTransitioning &&
             Width > DesiredCapsuleWindowWidth + 8 &&
             Height > PaperLayoutDefaults.CapsuleHeight + 8;
@@ -2950,7 +3011,7 @@ public sealed partial class PaperWindow : Window
         }
 
         var generation = ++_titleEditIntentGeneration;
-        if (_paper.IsCollapsed)
+        if (IsEffectivelyCollapsed)
         {
             ExpandForProgrammaticOpen();
         }
@@ -3723,6 +3784,14 @@ public sealed partial class PaperWindow : Window
     {
         if (IsPaperFormTransitioning || SuppressGeometrySave)
         {
+            return;
+        }
+
+        // 【新增功能】启动强制展开的 Todo 纸片：首次几何保存（Loaded 触发）时
+        // 跳过"把临时展开几何写回持久化"，之后用户手动拖动/调整仍正常保存。
+        if (_startupGeometryGuardActive)
+        {
+            _startupGeometryGuardActive = false;
             return;
         }
 

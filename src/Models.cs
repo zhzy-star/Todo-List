@@ -18,7 +18,7 @@ public static class PaperLayoutDefaults
     public const double CapsuleWidth = 92; // 包含阴影边框边距
     public const double CapsuleHeight = 46;
 
-    public const double TodoDefaultWidth = 280;
+    public const double TodoDefaultWidth = 320; // 【新增功能：蓝色主题】280→320：为行内日期列让出文本区空间（仅新纸片默认宽，已有纸片不受影响）
     public const double TodoDefaultHeight = 340;
 
     public const double NoteDefaultWidth = 320;
@@ -610,6 +610,14 @@ public sealed class AppState
     // so unplugging the anchored monitor gracefully lands the stack on a surviving screen.
     public string DeepCapsuleMonitorDeviceName { get; set; } = "";
 
+    // ===== 【新增功能：每日任务】=====
+    // 每日任务模板：永久保存（重启后保留），每日 0 点自动恢复为未完成。
+    public List<DailyTodoTemplate> DailyTodoTemplates { get; set; } = new();
+    // 当日每日任务完成记录：模板 Id -> 完成日期 "yyyy-MM-dd"。
+    // 只有等于"今天"的记录才视为当日已完成；跨天后自动失效（零点重置），
+    // 与模板分开存储，便于按日期判断自动恢复未完成状态。
+    public Dictionary<string, string> DailyTodoCompletions { get; set; } = new();
+
 }
 
 public sealed class PaperData
@@ -703,6 +711,18 @@ public sealed class PaperItem
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool ReminderTriggered { get; set; }
 
+    // ===== 【新增功能：普通任务截止日期】=====
+    // 截止日期（可空）。null 表示未设置截止日期；
+    // 未完成普通任务按截止日期升序排序，未设置的排最后；
+    // 已过截止日期仍未完成的任务文字标红高亮。
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTimeOffset? DueDate { get; set; }
+
+    // ===== 【新增功能：任务备注】=====
+    // 备注（可空）。在展开面板内点击行内备注图标展开编辑；胶囊小窗口不显示备注。
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Notes { get; set; }
+
     public void LinkPaper(string? paperId)
     {
         LinkedPaperId = NormalizeQuickLaunchValue(paperId);
@@ -745,4 +765,19 @@ public sealed class PaperItem
         var normalized = value?.Trim();
         return string.IsNullOrEmpty(normalized) ? null : normalized;
     }
+}
+
+// ===== 【新增功能：每日任务模板】=====
+// 与普通任务（PaperItem）分开存储：每日任务无截止日期、无 Reminder，
+// 只保存任务名称与顺序；每日 0 点自动恢复为未完成状态。
+public sealed class DailyTodoTemplate
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Text { get; set; } = "";
+    public int Order { get; set; }
+
+    // ===== 【新增功能：每日任务备注】=====
+    // 备注（可空）。在展开面板内点击行内备注图标展开编辑；胶囊小窗口不显示。
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Notes { get; set; }
 }

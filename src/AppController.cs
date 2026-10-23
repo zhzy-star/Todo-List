@@ -46,6 +46,9 @@ public sealed partial class AppController : IDisposable
     private readonly DispatcherTimer _displayMetricsRefreshTimer;
     private DispatcherTimer? _todoReminderTimer;
     private bool _hasPendingDirty;
+    // ===== 【新增功能：每日任务零点重置】=====
+    private DispatcherTimer? _dailyResetTimer;   // 跨天检查定时器（每 60 秒一次）
+    private string _dailyResetLastDate = "";     // 最近一次检查到的日期（yyyy-MM-dd）
 
     private TaskbarIcon? _trayIcon;
     private ContextMenu? _trayMenu;
@@ -222,6 +225,61 @@ public sealed partial class AppController : IDisposable
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.TimeChanged += OnSystemTimeChanged;
+
+        // ===== 【新增功能：每日任务零点重置】=====
+        // 每 60 秒检查一次是否跨天；跨天后：
+        //  1) 清理"非今天"的每日任务完成记录（惰性重置，次日自动恢复未完成）；
+        //  2) 刷新所有待办窗口（每日任务重新显示、普通任务过期标红更新）。
+        _dailyResetTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(60)
+        };
+        _dailyResetTimer.Tick += (_, _) => CheckDailyTodoDayRollover();
+        _dailyResetTimer.Start();
+        // 启动时先建立"今日"基准并清理历史遗留的完成记录
+        CheckDailyTodoDayRollover(force: true);
+    }
+
+    /// <summary>
+    /// 【新增功能】检查每日任务是否跨天，跨天则清理当日完成记录并刷新所有待办窗口。
+    /// force=true 用于启动时建立今日基准。
+    /// </summary>
+    private void CheckDailyTodoDayRollover(bool force = false)
+    {
+        var today = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        if (!force && string.Equals(_dailyResetLastDate, today, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _dailyResetLastDate = today;
+
+        var changed = false;
+        foreach (var id in State.DailyTodoCompletions.Keys.ToList())
+        {
+            // 只保留"今天"的完成记录；昨天的记录视为过期（每日任务自动恢复未完成）
+            if (!string.Equals(State.DailyTodoCompletions[id], today, StringComparison.Ordinal))
+            {
+                State.DailyTodoCompletions.Remove(id);
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            MarkDirty();
+        }
+
+        RefreshAllTodoWindowsForDayChange();
+    }
+
+    /// <summary>【新增功能】跨天刷新所有待办窗口（每日任务恢复未完成、过期标红更新）。</summary>
+    private void RefreshAllTodoWindowsForDayChange()
+    {
+        foreach (var window in _windows.Values.ToList())
+        {
+            window.RefreshDailyTodoSurfacesForDayChange();
+        }
     }
 
     public async Task StartAsync(
@@ -237,6 +295,18 @@ public sealed partial class AppController : IDisposable
         RefreshFullscreenAvoidanceRuntime();
         RefreshTodoReminderSchedule();
         RefreshExperimentalWindowRuntime();
+
+        // ===== 【新增功能：启动即显示待办主窗口（展开待办面板）】=====
+        // Todo 纸片无论持久化的 IsVisible / IsCollapsed 如何，本次启动都强制恢复显示并展开。
+        // 该覆盖仅本次会话生效（启动恢复阶段 _suppressDirty=true + 窗口侧几何守卫），
+        // 不写回 data.json，用户下次启动仍按自己保存的可见性/折叠偏好恢复。
+        // 若用户显式以 --hide / --toggle 命令行启动，则尊重命令，不做强制。
+        var startupForceExpandedTodoIds = initialVisibilityCommand is
+            StartupCommandKind.Hide or StartupCommandKind.Toggle
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : new HashSet<string>(
+                    State.Papers.Where(p => p.Type == PaperTypes.Todo).Select(p => p.Id),
+                    StringComparer.Ordinal);
 
         if (State.Papers.Count == 0)
         {
@@ -267,9 +337,11 @@ public sealed partial class AppController : IDisposable
 
         // Respect persisted IsVisible: hide closes the paper surface, delete removes it.
         // Tray/show-all (and second-instance show) still restore everything intentionally.
+        // 【新增功能】Todo 纸片在启动强制展开集合内时，即使持久化 IsVisible=false 也恢复显示。
         var papersToRestore = State.Papers.Where(paper =>
-            paper.IsVisible && !startupDeferredPaperIds.Contains(paper.Id)).ToList();
-        await RestorePaperSurfacesAsync(papersToRestore);
+            (paper.IsVisible || startupForceExpandedTodoIds.Contains(paper.Id)) &&
+            !startupDeferredPaperIds.Contains(paper.Id)).ToList();
+        await RestorePaperSurfacesAsync(papersToRestore, startupForceExpandedTodoIds);
         if (startupDeferredPaperIds.Count > 0)
         {
             _ = CompleteStartupMissingMonitorGraceAsync(
@@ -285,12 +357,19 @@ public sealed partial class AppController : IDisposable
         SchedulePluginStartupPapers(initialVisibilityCommand);
     }
 
-    private async Task RestorePaperSurfacesAsync(IReadOnlyList<PaperData> papersToRestore)
+    private async Task RestorePaperSurfacesAsync(
+        IReadOnlyList<PaperData> papersToRestore,
+        IReadOnlySet<string>? startupForceExpandedTodoIds = null)
     {
         var restoreGeneration = ++_paperSurfaceRestoreGeneration;
+        // 【新增功能】启动强制展开的 Todo 纸片优先作为激活目标；
+        // 其余沿用原逻辑：排除"深胶囊模式下的折叠纸片"后取最后一张。
         var activationPaper = papersToRestore.LastOrDefault(paper =>
+            (startupForceExpandedTodoIds?.Contains(paper.Id) ?? false) ||
             !(State.UseCapsuleMode && State.UseDeepCapsuleMode && paper.IsCollapsed && CanPaperDisplayAsCapsule(paper)));
+        // 【新增功能】启动强制展开的 Todo 不进入边缘深胶囊预备（以展开待办面板形态恢复）。
         var edgeCapsulesToPrepare = papersToRestore
+            .Where(paper => !(startupForceExpandedTodoIds?.Contains(paper.Id) ?? false))
             .Where(ShouldPrepareStartupEdgeCapsule)
             .ToList();
         _isPreparingStartupEdgeCapsules = edgeCapsulesToPrepare.Count > 0;
@@ -347,12 +426,16 @@ public sealed partial class AppController : IDisposable
         {
             foreach (var paper in papersToRestore)
             {
-                if (!paper.IsVisible || !State.Papers.Contains(paper))
+                // 【新增功能】启动强制展开的 Todo：即使持久化 IsVisible=false 也放行恢复显示。
+                var forceExpanded = startupForceExpandedTodoIds?.Contains(paper.Id) ?? false;
+                if ((!paper.IsVisible && !forceExpanded) || !State.Papers.Contains(paper))
                 {
                     continue;
                 }
 
+                // 启动强制展开的 Todo 不作为边缘深胶囊预备（以展开面板形态恢复）。
                 if (paper.IsCollapsed &&
+                    !forceExpanded &&
                     ShouldPrepareStartupEdgeCapsule(paper) &&
                     _windows.TryGetValue(paper.Id, out var capsuleWindow) &&
                     capsuleWindow.IsDeepCapsulePlaced)
@@ -360,7 +443,10 @@ public sealed partial class AppController : IDisposable
                     continue;
                 }
 
-                ShowPaper(paper, activate: ReferenceEquals(paper, activationPaper));
+                ShowPaper(
+                    paper,
+                    activate: ReferenceEquals(paper, activationPaper),
+                    startupForceExpandedTodo: forceExpanded);
             }
 
             _isPreparingStartupEdgeCapsules = false;
@@ -1193,7 +1279,8 @@ public sealed partial class AppController : IDisposable
 
     private PaperWindow GetOrCreatePaperWindow(
         PaperData paper,
-        bool deferShellConstruction = false)
+        bool deferShellConstruction = false,
+        bool startupForceExpandedTodo = false)
     {
         if (_windows.TryGetValue(paper.Id, out var existing))
         {
@@ -1203,6 +1290,11 @@ public sealed partial class AppController : IDisposable
                 {
                     existing.EnsureShellBuilt();
                 }
+                if (startupForceExpandedTodo)
+                {
+                    // 【新增功能】已存在窗口在启动强制展开路径下刷新形态覆盖
+                    existing.EnableStartupForceExpandedTodo();
+                }
                 return existing;
             }
 
@@ -1210,7 +1302,7 @@ public sealed partial class AppController : IDisposable
         }
 
         var paperId = paper.Id;
-        var window = new PaperWindow(paper, this, deferShellConstruction);
+        var window = new PaperWindow(paper, this, deferShellConstruction, startupForceExpandedTodo);
         if (_experimentalAllSurfacesPassive)
         {
             window.SetExperimentalAllSurfacesPassive(enabled: true);
@@ -1245,7 +1337,10 @@ public sealed partial class AppController : IDisposable
         paper.IsCollapsed = collapsed;
     }
 
-    public void ShowPaper(PaperData paper, bool activate = true)
+    public void ShowPaper(
+        PaperData paper,
+        bool activate = true,
+        bool startupForceExpandedTodo = false)
     {
         if (IsExiting)
         {
@@ -1257,7 +1352,10 @@ public sealed partial class AppController : IDisposable
         {
             RefreshTopmostForForegroundWindow();
         }
-        if (paper.IsCollapsed && !CanPaperDisplayAsCapsule(paper))
+        // 【新增功能】启动强制展开：Todo 纸片临时视为"未折叠"（展开待办面板），
+        // 不修改持久化 _paper.IsCollapsed（不写回 data.json）。
+        var effectiveCollapsed = paper.IsCollapsed && !startupForceExpandedTodo;
+        if (effectiveCollapsed && !CanPaperDisplayAsCapsule(paper))
         {
             SetPaperCollapsedRuntime(paper, collapsed: false, animate: false, saveGeometry: false);
         }
@@ -1269,10 +1367,11 @@ public sealed partial class AppController : IDisposable
         }
         Rect? snapTileBounds = null;
 
-        var showAsDeepCapsuleOnly = State.UseCapsuleMode && State.UseDeepCapsuleMode && paper.IsCollapsed;
+        var showAsDeepCapsuleOnly = State.UseCapsuleMode && State.UseDeepCapsuleMode && effectiveCollapsed;
         var window = GetOrCreatePaperWindow(
             paper,
-            deferShellConstruction: showAsDeepCapsuleOnly);
+            deferShellConstruction: showAsDeepCapsuleOnly,
+            startupForceExpandedTodo: startupForceExpandedTodo);
         window.RestoreExperimentalTetherPresentationForExplicitShow();
         window.CancelPendingVisibilityTransitions();
         if (!showAsDeepCapsuleOnly)
@@ -1282,7 +1381,7 @@ public sealed partial class AppController : IDisposable
         // Restore first: a hidden minimized window raises StateChanged while it is still invisible,
         // so that event cannot resume note image rendering on its own.
         window.PrepareForShow();
-        if (!paper.IsCollapsed && window.TryGetRememberedSnapTileBoundsForRestore(out var rememberedSnapTileBounds))
+        if (!effectiveCollapsed && window.TryGetRememberedSnapTileBoundsForRestore(out var rememberedSnapTileBounds))
         {
             snapTileBounds = rememberedSnapTileBounds;
         }
@@ -1294,7 +1393,7 @@ public sealed partial class AppController : IDisposable
                 : new Rect(paper.X, paper.Y, paper.Width, paper.Height);
             window.Left = targetBounds.Left;
             window.Top = targetBounds.Top;
-            if (paper.IsCollapsed && State.UseCapsuleMode)
+            if (effectiveCollapsed && State.UseCapsuleMode)
             {
                 window.Width = window.DesiredCapsuleWindowWidth;
                 window.Height = PaperLayoutDefaults.CapsuleHeight;
@@ -4107,6 +4206,7 @@ public sealed partial class AppController : IDisposable
         StopFullscreenAvoidanceRuntime(restoreTopmost: false);
         _displayMetricsRefreshTimer.Stop();
         StopTodoReminderTimer();
+        _dailyResetTimer?.Stop();   // 【新增功能】退出时停止每日跨天检查定时器
 
         if (!TrySaveNow(sync: true))
         {

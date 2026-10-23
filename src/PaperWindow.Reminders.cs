@@ -197,7 +197,7 @@ public sealed partial class PaperWindow
             Text = TodoReminderCountdownText(
                 item.ReminderAt!.Value,
                 DateTimeOffset.Now),
-            Foreground = Theme.ActiveBrush,
+            Foreground = Theme.AccentWeakBrush,   // 【新增功能：蓝色主题】提醒倒计时淡蓝弱化（次要控件，弱于任务名/截止日期）
             FontFamily = AppTypography.UiFontFamily,
             FontSize = Math.Max(
                 AppTypography.Scale(10),

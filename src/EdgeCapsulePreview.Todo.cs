@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -9,14 +10,23 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
 {
     // Keep row creation bounded; totals still describe the complete model and the paper remains
     // the place for browsing the full list.
-    internal const int MaximumRenderedItems = 12;
+    // 【新增功能：动态尺寸】渲染行数上限从 12 放宽到 20（普通/每日各最多 20 行），
+    // 让胶囊小窗口尽量一次显示全部任务，不再频繁出现"…"截断。
+    internal const int MaximumRenderedItems = 20;
     internal const int MaximumItemCharacters = 512;
     internal const double LinkedTargetButtonSizeDip = 20;
+
+    // 【新增功能：动态尺寸】Todo 预览高度上限从全局 320 放宽到 640。
+    // 不修改共享的 BuiltInMaximumHeightDip（笔记/插件预览还在用 320）；
+    // 640 是 provider 侧上限，调用侧仍会按屏幕可用区域（monitor 高度 - 16）自动裁剪，
+    // 所以不会撑出屏幕。
+    internal const double TodoMaximumHeightDip = 640;
 
     // Total card width lost before todo text reaches its Grid column:
     // host close/chrome 22 + view margins 19 + items right margin 2 + row padding 7 +
     // checkbox column 24 + text margins 6 = 80 DIPs. Marker width is added separately per row.
-    private const double TodoTextLaneFixedReserveDip = 80;
+    // 【新增功能：小窗口显示截止日期】每行截止日期列（"MM-dd" 约 30px + 边距 2）再占用 32 DIPs。
+    private const double TodoTextLaneFixedReserveDip = 80 + 32;
 
     public static TodoEdgeCapsulePreviewProvider Instance { get; } = new();
 
@@ -26,11 +36,14 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
 
     public EdgeCapsulePreviewDescriptor Describe(EdgeCapsulePreviewContext context)
     {
-        var snapshot = CaptureSnapshot(context.Paper);
+        var snapshot = CaptureSnapshot(context.Paper, context.State);
         var items = snapshot.Items;
+        // ===== 【新增功能：每日任务进胶囊预览】尺寸估算把每日任务行一并计入 =====
+        // 预览卡片高度随"每日任务 + 限时任务"总行数增长，避免每日任务多时被截断。
         var body = string.Join(
             Environment.NewLine,
-            items.Select(item => PreviewItemText(item.Text)));
+            items.Select(item => PreviewItemText(item.Text))
+                .Concat(snapshot.DailyItems.Select(template => PreviewItemText(template.Text))));
         var markerReserve = MaximumMarkerReserveDip(items);
         var textLaneReserve = TodoTextLaneFixedReserveDip + markerReserve;
         var width = EdgeCapsulePreviewMeasure.MeasureWidth(
@@ -43,22 +56,29 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
         // these two calculations on one reserve prevents the renderer from wrapping text that the
         // size estimator believed still had room beside the optional marker controls.
         var availableTextWidth = Math.Max(1, width - textLaneReserve);
-        var estimatedLines = items.Count == 0
+        var estimatedLines = items.Count == 0 && snapshot.DailyItems.Count == 0
             ? 1
-            : items.Sum(item => Math.Clamp(
-                EdgeCapsulePreviewMeasure.EstimateWrappedLines(
-                    PreviewItemText(item.Text),
-                    availableTextWidth),
-                1,
-                3));
-        var height = items.Count == 0
+            : items.Concat(snapshot.DailyItems.Cast<object>())
+                .Sum(item => Math.Clamp(
+                    EdgeCapsulePreviewMeasure.EstimateWrappedLines(
+                        PreviewItemText(item is PaperItem paperItem ? paperItem.Text : ((DailyTodoTemplate)item).Text),
+                        availableTextWidth),
+                    1,
+                    3));
+        // 【新增功能：动态尺寸】高度按内容行数线性增长（行高 30 贴合实际行高，防截断），
+        // 上限放宽到 TodoMaximumHeightDip（640）；空态保持 120。
+        // 分区标题（每日任务/限时任务）各占一行，计入估算，避免最后一行被截断。
+        var sectionLabelRows = (items.Count > 0 ? 1 : 0) + (snapshot.DailyItems.Count > 0 ? 1 : 0);
+        var height = items.Count == 0 && snapshot.DailyItems.Count == 0
             ? 120
             : Math.Clamp(
-                62 + Math.Min(MaximumRenderedItems, estimatedLines) *
-                    AppTypography.Scale(28),
+                62 + Math.Min(
+                    MaximumRenderedItems + Math.Min(MaximumRenderedItems, snapshot.DailyItems.Count),
+                    estimatedLines + sectionLabelRows) *
+                    AppTypography.Scale(30),
                 150,
-                EdgeCapsulePreviewSize.BuiltInMaximumHeightDip);
-        if (items.Count == 0)
+                TodoMaximumHeightDip);
+        if (items.Count == 0 && snapshot.DailyItems.Count == 0)
         {
             width = Math.Max(130, width);
         }
@@ -68,52 +88,41 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
             size => new TodoEdgeCapsulePreviewView(context, size, snapshot));
     }
 
-    internal static TodoEdgeCapsulePreviewSnapshot CaptureSnapshot(PaperData paper)
+    internal static TodoEdgeCapsulePreviewSnapshot CaptureSnapshot(
+        PaperData paper,
+        AppState state)   // 【新增功能】每日任务在全局 AppState，快照需要一并传入
     {
-        var selected = new List<PaperItem>(MaximumRenderedItems);
-        var total = 0;
-        var done = 0;
-        foreach (var item in paper.Items)
-        {
-            if (!TodoRules.HasMeaningfulContent(item))
-            {
-                continue;
-            }
+        var meaningfulItems = paper.Items
+            .Where(TodoRules.HasMeaningfulContent)
+            .ToList();
+        var total = meaningfulItems.Count;
+        var done = meaningfulItems.Count(item => item.Done);
 
-            total++;
-            if (item.Done)
-            {
-                done++;
-            }
+        // ===== 【新增功能：小窗口按截止时间排序】与展开面板 OrderedItems 口径一致 =====
+        // 1) 未完成普通任务在前，按截止日期升序（DueDate 为 null 视作无穷大，排最后）；
+        // 2) 已完成普通任务排在最后；
+        // 3) 同排序键以原有 Order（拖拽顺序）为次级稳定排序。
+        // 只取前 MaximumRenderedItems 条渲染，总量（total/done）仍统计完整模型。
+        var selected = meaningfulItems
+            .OrderBy(item => item.Done)
+            .ThenBy(item => item.DueDate ?? DateTimeOffset.MaxValue)
+            .ThenBy(item => item.Order)
+            .Take(MaximumRenderedItems)
+            .ToList();
 
-            // Keep only the stable first 12 items by Order. With a fixed-size insertion list this
-            // is one model pass, O(n * 12), and never sorts/materializes the complete todo model.
-            var insertionIndex = selected.Count;
-            for (var index = 0; index < selected.Count; index++)
-            {
-                if (item.Order < selected[index].Order)
-                {
-                    insertionIndex = index;
-                    break;
-                }
-            }
-            if (insertionIndex == selected.Count)
-            {
-                if (selected.Count < MaximumRenderedItems)
-                {
-                    selected.Add(item);
-                }
-                continue;
-            }
+        // ===== 【新增功能：每日任务进胶囊预览】收集当日未完成的每日任务模板 =====
+        // 与展开面板同一规则（DailyTodoCompletions[id] == 今天 → 当天隐藏），
+        // 按模板 Order 升序，最多渲染与普通任务相同的行数上限。
+        var todayKey = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var dailyItems = state.DailyTodoTemplates
+            .OrderBy(template => template.Order)
+            .Where(template =>
+                !(state.DailyTodoCompletions?.TryGetValue(template.Id, out var completedDate) == true &&
+                  string.Equals(completedDate, todayKey, StringComparison.Ordinal)))
+            .Take(MaximumRenderedItems)
+            .ToList();
 
-            selected.Insert(insertionIndex, item);
-            if (selected.Count > MaximumRenderedItems)
-            {
-                selected.RemoveAt(MaximumRenderedItems);
-            }
-        }
-
-        return new TodoEdgeCapsulePreviewSnapshot(selected, total, done);
+        return new TodoEdgeCapsulePreviewSnapshot(selected, total, done, dailyItems);
     }
 
     internal static string PreviewItemText(string? value)
@@ -176,10 +185,19 @@ internal sealed class TodoEdgeCapsulePreviewProvider : IEdgeCapsulePreviewProvid
 internal sealed record TodoEdgeCapsulePreviewSnapshot(
     IReadOnlyList<PaperItem> Items,
     int Total,
-    int Done);
+    int Done,
+    // ===== 【新增功能：每日任务进胶囊预览】当日未完成的每日任务模板 =====
+    // 与展开面板同规则：当天已完成的模板不进快照（当天隐藏），次日自动恢复。
+    IReadOnlyList<DailyTodoTemplate> DailyItems);
 
 internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
 {
+    // 【新增功能：小窗口显示截止日期】过期未完成任务的日期标红（与展开面板 OverdueTextBrush 同色：
+    // 浅色 #C62828 / 深色 #FF8A80），未过期用弱色。
+    private static Brush OverdueBrush => Theme.IsDark
+        ? new SolidColorBrush(Color.FromRgb(0xFF, 0x8A, 0x80))
+        : new SolidColorBrush(Color.FromRgb(0xC6, 0x28, 0x28));
+
     private readonly TextBlock _title;
     private readonly TextBlock _summary;
     private readonly StackPanel _items;
@@ -244,7 +262,7 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
     protected override void RebuildContent()
     {
         var snapshot = _initialSnapshot ??
-            TodoEdgeCapsulePreviewProvider.CaptureSnapshot(Context.Paper);
+            TodoEdgeCapsulePreviewProvider.CaptureSnapshot(Context.Paper, Context.State);
         _initialSnapshot = null;
         var meaningful = snapshot.Items;
 
@@ -256,7 +274,12 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
         try
         {
             _items.Children.Clear();
-            if (meaningful.Count == 0)
+            // ===== 【新增功能：每日任务进胶囊预览】分区渲染 =====
+            // 与展开面板一致：上方「每日任务」（当天已完成的隐藏），下方「限时任务」；
+            // 两者都空时才显示空态占位。
+            var hasDaily = snapshot.DailyItems.Count > 0;
+            var hasRegular = meaningful.Count > 0;
+            if (!hasDaily && !hasRegular)
             {
                 var empty = new TextBlock
                 {
@@ -271,9 +294,21 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
             }
             else
             {
-                foreach (var item in meaningful)
+                if (hasDaily)
                 {
-                    _items.Children.Add(BuildRow(item));
+                    _items.Children.Add(BuildSectionLabel("每日任务"));
+                    foreach (var template in snapshot.DailyItems)
+                    {
+                        _items.Children.Add(BuildDailyRow(template));
+                    }
+                }
+                if (hasRegular)
+                {
+                    _items.Children.Add(BuildSectionLabel("限时任务"));
+                    foreach (var item in meaningful)
+                    {
+                        _items.Children.Add(BuildRow(item));
+                    }
                 }
             }
         }
@@ -283,6 +318,92 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
         }
 
         _viewport.SetSourceTruncated(snapshot.Total > meaningful.Count);
+    }
+
+    // ===== 【新增功能：每日任务进胶囊预览】分区标题（胶囊内黑色文字）=====
+    private FrameworkElement BuildSectionLabel(string text)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            Margin = new Thickness(2, 4, 2, 1),
+            FontFamily = AppTypography.UiFontFamily,
+            FontSize = AppTypography.Scale(11),
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        label.SetResourceReference(TextBlock.ForegroundProperty, "TextBrushKey");
+        return label;
+    }
+
+    // ===== 【新增功能：每日任务进胶囊预览】胶囊预览的每日任务行 =====
+    // 复选框 + 任务名称（无删除线、无提醒/链接标记）；
+    // 勾选 → Context.SetDailyTodoDone → 记录当天完成 + 当天隐藏（次日零点自动恢复）。
+    private FrameworkElement BuildDailyRow(DailyTodoTemplate template)
+    {
+        var row = new Border
+        {
+            Margin = new Thickness(0, 1, 0, 1),
+            Padding = new Thickness(3, 3, 4, 3),
+            CornerRadius = new CornerRadius(5),
+            Background = Brushes.Transparent
+        };
+        row.MouseEnter += (_, _) =>
+            row.SetResourceReference(Border.BackgroundProperty, "HoverBrushKey");
+        row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition());
+
+        var check = new CheckBox
+        {
+            IsChecked = false,
+            Width = 20,
+            Height = 20,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 1, 0, 0),
+            Cursor = Cursors.Hand,
+            Focusable = false,
+            FocusVisualStyle = null,
+            Style = Context.ReadTodoCheckStyle()
+        };
+        EdgeCapsulePreviewInteraction.SetConsumesPointer(check, true);
+        check.Click += (_, _) =>
+        {
+            if (_rebuilding)
+            {
+                return;
+            }
+
+            var requested = check.IsChecked == true;
+            if (!Context.SetDailyTodoDone(template.Id, requested))
+            {
+                _rebuilding = true;
+                check.IsChecked = false;
+                _rebuilding = false;
+                return;
+            }
+        };
+        grid.Children.Add(check);
+
+        var text = new TextBlock
+        {
+            Text = TodoEdgeCapsulePreviewProvider.PreviewItemText(template.Text),
+            Margin = new Thickness(1, 0, 5, 0),
+            FontFamily = AppTypography.FontFamilyFor(content: true, bold: false),
+            FontSize = AppTypography.Scale(12),
+            FontWeight = FontWeights.Normal,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        text.SetResourceReference(TextBlock.ForegroundProperty, "TextBrushKey");
+        Grid.SetColumn(text, 1);
+        grid.Children.Add(text);
+
+        row.Child = grid;
+        return row;
     }
 
     private FrameworkElement BuildRow(PaperItem item)
@@ -301,7 +422,8 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
         grid.ColumnDefinitions.Add(new ColumnDefinition());
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // 【新增】截止日期列
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });   // marker 列（后移）
 
         var check = new CheckBox
         {
@@ -355,8 +477,35 @@ internal sealed class TodoEdgeCapsulePreviewView : EdgeCapsuleLivePreviewView
         Grid.SetColumn(text, 1);
         grid.Children.Add(text);
 
+        // ===== 【新增功能：小窗口显示截止日期】普通任务行的截止日期（MM-dd，过期标红）=====
+        // 与展开面板规则一致：未完成且当前时间已过截止日期 → 红色；其余弱色。
+        // 每日任务没有截止日期，不受影响。
+        if (item.DueDate is { } dueDate)
+        {
+            var dueLabel = new TextBlock
+            {
+                Text = dueDate.LocalDateTime.ToString("MM-dd", CultureInfo.InvariantCulture),
+                Margin = new Thickness(0, 0, 2, 0),
+                FontFamily = AppTypography.UiFontFamily,
+                FontSize = AppTypography.Scale(10.5),
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = dueDate.ToString("yyyy-MM-dd")
+            };
+            var overdue = !item.Done && item.DueDate < DateTimeOffset.Now;
+            if (overdue)
+            {
+                dueLabel.Foreground = OverdueBrush;   // 过期 → 红
+            }
+            else
+            {
+                dueLabel.SetResourceReference(TextBlock.ForegroundProperty, "WeakTextBrushKey");
+            }
+            Grid.SetColumn(dueLabel, 2);
+            grid.Children.Add(dueLabel);
+        }
+
         var marker = BuildItemMarker(item);
-        Grid.SetColumn(marker, 2);
+        Grid.SetColumn(marker, 3);   // marker 列后移到列 3
         grid.Children.Add(marker);
 
         row.Child = grid;

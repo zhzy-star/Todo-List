@@ -90,12 +90,19 @@ internal sealed class EdgeCapsulePreviewInvalidationSource
 
 internal sealed record EdgeCapsulePreviewContext(
     PaperData Paper,
+    // ===== 【新增功能：每日任务进胶囊预览】全局应用状态引用 =====
+    // 每日任务模板与当日完成记录存放在 AppState（应用级），不在 PaperData（纸片级），
+    // 胶囊预览快照需要从这里读取每日任务。
+    AppState State,
     Func<string> ReadTitle,
     bool PaperExpanded,
     Func<string> ReadMarkdownText,
     Func<string> ReadMarkdownRenderMode,
     Func<string, bool, bool> SetTodoDone,
     Func<string, bool> OpenTodoLinkedTarget,
+    // ===== 【新增功能：每日任务进胶囊预览】勾选每日任务的回调 =====
+    // 胶囊预览勾选每日任务 → 记录当日完成 + 当天隐藏；取消勾选 → 移除当日记录恢复显示。
+    Func<string, bool, bool> SetDailyTodoDone,
     Func<Style> ReadTodoCheckStyle,
     Func<string> ReadPluginStatus,
     Action<string> OpenExternal,

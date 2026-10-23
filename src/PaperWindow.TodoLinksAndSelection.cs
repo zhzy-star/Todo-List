@@ -36,8 +36,10 @@ public sealed partial class PaperWindow
     private bool _todoSelectionInputHooksInstalled;
     private DispatcherTimer? _todoSweepTrackingTimer;
 
+    // 【新增功能：蓝色主题】选中高亮：主蓝低透明度叠加（浅色 20%、深色 28%），
+    // 与行悬停的浅蓝底同色系，选中态层级更明显。
     private static Brush TodoSelectionBrush =>
-        Theme.Tint((byte)(Theme.IsDark ? 62 : 42));
+        Theme.BrushWithAlpha(Theme.AccentBrush, Theme.IsDark ? 0.28 : 0.20);
 
     private static Brush TodoReminderActiveBrush =>
         Theme.Danger((byte)(Theme.IsDark ? 52 : 38));
@@ -572,7 +574,10 @@ public sealed partial class PaperWindow
             return null;
         }
 
-        var orderedIds = OrderedItems().Select(item => item.Id).ToList();
+        var orderedIds = OrderedItems()
+            .Where(item => !item.Done)   // 【新增功能】已完成任务不在主列表，选择范围跳过
+            .Select(item => item.Id)
+            .ToList();
         var anchorIndex = orderedIds.IndexOf(state.AnchorItemId);
         var targetIndex = anchorIndex + direction;
         return anchorIndex >= 0 && targetIndex >= 0 && targetIndex < orderedIds.Count
@@ -582,7 +587,10 @@ public sealed partial class PaperWindow
 
     private void SelectTodoRange(string anchorItemId, string targetItemId)
     {
-        var orderedIds = OrderedItems().Select(item => item.Id).ToList();
+        var orderedIds = OrderedItems()
+            .Where(item => !item.Done)   // 【新增功能】已完成任务不在主列表，选择范围跳过
+            .Select(item => item.Id)
+            .ToList();
         var anchorIndex = orderedIds.IndexOf(anchorItemId);
         var targetIndex = orderedIds.IndexOf(targetItemId);
         if (anchorIndex < 0 || targetIndex < 0)
@@ -646,7 +654,7 @@ public sealed partial class PaperWindow
                 ? TodoReminderActiveBrush
                 : itemId != null && _findHiddenTodoItemIds.Contains(itemId)
                     ? Theme.Tint((byte)(Theme.IsDark ? 42 : 28))
-                    : row.IsMouseOver ? HoverBrush : Brushes.Transparent;
+                    : row.IsMouseOver ? Theme.RowHoverBrush : Brushes.Transparent;   // 【新增功能：卡片化】行悬停浅蓝底（比卡片底深一档）
 
         if (itemId == null || !_todoEditors.TryGetValue(itemId, out var text))
         {
@@ -750,6 +758,7 @@ public sealed partial class PaperWindow
             done && _controller.State.AutoClearCompletedTodos
                 ? null
                 : selected.Select(item => item.Id));
+        RefreshCompletedSection();   // 【新增功能】批量勾选/取消后同步刷新已完成折叠区
         RefreshCapsuleEligibilityForLinkedPaperChanges(previousItems);
     }
 

@@ -671,6 +671,14 @@ public sealed partial class PaperWindow
         EnsureShellBuilt();
         animate = animate && _controller.State.EnableAnimations;
 
+        // 【新增功能】用户主动折叠时清除"启动强制展开"会话标志：
+        // 该标志只覆盖启动初始态，不剥夺用户此后折叠回胶囊的能力。
+        if (collapsed && _startupForceExpandedTodo)
+        {
+            _startupForceExpandedTodo = false;
+            _startupGeometryGuardActive = false;
+        }
+
         if (collapsed && !CanDisplayAsCapsule())
         {
             if (_paper.IsCollapsed)

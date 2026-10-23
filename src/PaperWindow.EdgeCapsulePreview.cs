@@ -217,16 +217,49 @@ public sealed partial class PaperWindow
     private EdgeCapsulePreviewContext CreateEdgeCapsulePreviewContext() =>
         new(
             _paper,
+            _controller.State,   // 【新增功能】全局应用状态（每日任务模板/完成记录）
             () => _controller.PaperTitleText(_paper),
             !_paper.IsCollapsed,
             CurrentMarkdownTextForEdgeCapsulePreview,
             () => _controller.State.MarkdownRenderMode,
             SetTodoDoneFromEdgeCapsulePreview,
             OpenTodoLinkedTargetFromEdgeCapsulePreview,
+            SetDailyTodoDoneFromEdgeCapsulePreview,   // 【新增功能】胶囊预览勾选每日任务
             CurrentTodoCheckBoxStyle,
             CurrentPluginStatusForEdgeCapsulePreview,
             OpenExternalFromEdgeCapsulePreview,
             _edgeCapsulePreviewInvalidationSource);
+
+    // ===== 【新增功能：每日任务进胶囊预览】胶囊预览勾选/取消勾选每日任务 =====
+    // 与展开面板同一套状态：勾选 → DailyTodoCompletions[id]=今天（当天隐藏，次日自动恢复）；
+    // 取消勾选 → 移除当日记录。同步刷新胶囊预览与展开面板。
+    private bool SetDailyTodoDoneFromEdgeCapsulePreview(string templateId, bool done)
+    {
+        if (_paper.Type != PaperTypes.Todo)
+        {
+            return false;
+        }
+
+        var template = _controller.State.DailyTodoTemplates.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id, templateId, StringComparison.Ordinal));
+        if (template == null)
+        {
+            return false;
+        }
+
+        if (done)
+        {
+            _controller.State.DailyTodoCompletions[template.Id] = TodayKey;
+        }
+        else
+        {
+            _controller.State.DailyTodoCompletions.Remove(template.Id);
+        }
+        _controller.MarkDirty();
+        InvalidateEdgeCapsulePreviewContent();
+        RebuildDailyTodoRows();
+        return true;
+    }
 
     private bool TryGetRuntimeVariableEdgeCapsulePreviewCapacity(
         out EdgeCapsulePreviewSize size,

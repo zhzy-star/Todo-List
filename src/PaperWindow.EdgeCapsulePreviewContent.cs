@@ -67,6 +67,7 @@ public sealed partial class PaperWindow
         ReconcileTodoRows(
             new[] { item.Id },
             focusItemId: focusedId);
+        RefreshCompletedSection();   // 【新增功能】胶囊预览勾选/取消后同步刷新已完成折叠区
         return true;
     }
 

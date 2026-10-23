@@ -30,25 +30,386 @@ public sealed partial class PaperWindow
             _paper.Items.Add(new PaperItem { Order = 0 });
         }
 
+        // ===== 【新增功能】外层容器：每日任务卡片 + 限时任务卡片 =====
+        // 【新增功能：卡片化（方案A+B混搭·极简浅蓝+白）】每日/限时两个区块各自包成
+        // 一张圆角卡片（白底/深蓝灰底 + 淡蓝描边，Theme.CardBrush/CardBorderBrush），
+        // 卡片间 8px 间距；区块内部不再画分隔线，靠内边距与留白分区（Todoist 式极简）。
+        // 原 _todoPanel 仍承载未完成普通任务行与底部追加区，原有逻辑全部保留。
+        var root = new StackPanel();
+        root.Children.Add(BuildDailyTodoSection());      // 【新增】每日任务卡片（独立分区）
+
+        // 限时任务卡片：区块标题 + 新增表单 + 未完成任务列表 + 已完成折叠区
+        var todoCard = new Border
+        {
+            Background = Theme.CardBrush,
+            BorderBrush = Theme.CardBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(Theme.IsPixelSkin ? 0 : RadiusControl),
+            Padding = new Thickness(8, 6, 8, 6),
+            Margin = new Thickness(4, 4, 4, 4)
+        };
+        var todoCardBody = new StackPanel();
+        todoCardBody.Children.Add(BuildTodoSectionHeader());     // 【新增】"限时任务"区块标题
+        todoCardBody.Children.Add(BuildTodoAppendForm());        // 【新增】限时任务新增表单（名称+日期选择器+添加按钮）
+
         _todoPanel = new StackPanel
         {
-            Margin = new Thickness(6.4, 3.2, 5.6, 3.2)
+            Margin = new Thickness(0, 4, 0, 2)
         };
 
         EnsureTodoSelectionInputHooks();
         RebuildTodoRows();
+        todoCardBody.Children.Add(_todoPanel);
+
+        todoCardBody.Children.Add(BuildCompletedSection());      // 【新增】已完成普通任务折叠区（默认隐藏）
+        todoCard.Child = todoCardBody;
+        root.Children.Add(todoCard);
 
         var scrollViewer = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Content = _todoPanel,
+            Content = root,
             FocusVisualStyle = null
         };
+        _todoScrollViewer = scrollViewer;   // 【新增功能：添加后定位可见】保存引用供添加后滚动定位
         scrollViewer.ScrollChanged += OnTodoDragScrollChanged;
         AttachTodoBackgroundHost(scrollViewer);
         return scrollViewer;
     }
+
+    // ===== 【新增功能：卡片化】圆角输入框 + 圆角主蓝按钮（方案A+B混搭·极简浅蓝+白）=====
+    // 输入框：外层 Border 圆角 5 + 弱色描边，内层 TextBox 去边框透明背景，
+    // 聚焦时外层描边变主蓝（焦点边框）；两个区块的表单共用，风格统一。
+    // 注意：返回的是外层 Border（唯一父级），TextBox 通过 out 参数交给调用方
+    // 使用（Text/Clear/KeyDown 等），避免"元素已是另一个元素的逻辑子级"异常。
+    private Border BuildChromeTextBox(out TextBox input)
+    {
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(5),
+            // 【新增功能：卡片化】输入框底用待办纸面色（浅色下比卡片浅蓝更白一档，层次清晰）
+            Background = Theme.TodoPaperBrush,
+            BorderBrush = WeakTextBrush,
+            BorderThickness = new Thickness(1)
+        };
+        input = new TextBox
+        {
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(5, 2, 5, 2),
+            FontSize = AppTypography.Scale(12),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            MaxLength = TodoTextMaxLength,
+            Background = Brushes.Transparent,
+            Foreground = TextBrush,
+            CaretBrush = TextBrush
+        };
+        border.Child = input;
+        input.GotKeyboardFocus += (_, _) => border.BorderBrush = Theme.AccentBrush;
+        input.LostKeyboardFocus += (_, _) => border.BorderBrush = WeakTextBrush;
+        return border;
+    }
+
+    /// <summary>
+    /// 圆角主蓝添加按钮：外层 Border 负责圆角 5 + 主蓝底（悬停变 AccentHover），
+    /// 内层透明 Button 承接点击/悬停/工具提示；不覆盖 ControlTemplate，避免模板构建崩溃。
+    /// </summary>
+    private Border BuildAccentButton(string content, string? toolTip, Action onClick)
+    {
+        var button = new Button
+        {
+            Content = content,
+            Margin = new Thickness(0),
+            Padding = new Thickness(0),
+            FontSize = AppTypography.Scale(12),
+            Cursor = Cursors.Hand,
+            Background = Brushes.Transparent,
+            Foreground = Theme.AccentForegroundBrush,
+            BorderThickness = new Thickness(0),
+            ToolTip = toolTip,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(5),
+            Background = Theme.AccentBrush,
+            Padding = new Thickness(10, 2, 10, 2),
+            Margin = new Thickness(4, 0, 0, 0),
+            Child = button
+        };
+        button.MouseEnter += (_, _) => border.Background = Theme.AccentHoverBrush;
+        button.MouseLeave += (_, _) => border.Background = Theme.AccentBrush;
+        button.Click += (_, _) => onClick();
+        return border;
+    }
+
+    // ===== 【新增功能：限时任务区块标题】=====
+    // 【新增功能：卡片化】区块标题：主蓝 SemiBold；不再画分隔线，靠卡片内边距与留白分区（极简）。
+    private UIElement BuildTodoSectionHeader()
+    {
+        var header = new TextBlock
+        {
+            Text = "限时任务（普通任务）",
+            FontWeight = FontWeights.SemiBold,
+            FontSize = AppTypography.Scale(12.5),
+            Foreground = TextBrush,   // 【新增功能】区块标题改黑色（白纸黑字；深色主题浅色文字）
+            Margin = new Thickness(0, 0, 0, 4)
+        };
+        return header;
+    }
+
+    // ---- 【新增功能：限时任务新增表单】UI 引用 ----
+    private TextBox? _todoFormInput;          // 限时任务名称输入框
+    private DatePicker? _todoFormDatePicker;  // 截止日期选择器（默认今天）
+
+    // ===== 【新增功能：添加后定位可见】待办面板滚动容器引用 =====
+    // 添加每日任务后 ScrollToTop（每日卡片在面板顶部，滚到顶让新任务立即可见）；
+    // 添加限时任务后 ScrollToEnd（新行追加在限时列表底部）。
+    private ScrollViewer? _todoScrollViewer;
+
+    // ===== 【新增功能：限时任务新增表单】任务名称 + 截止日期选择器 + 添加按钮 =====
+    // 【新增功能：卡片化】输入框改圆角（BuildChromeTextBox），添加按钮改圆角主蓝
+    // （BuildAccentButton），表单在限时卡片内部，外边距交给卡片统一控制。
+    private UIElement BuildTodoAppendForm()
+    {
+        var form = new Grid { Margin = new Thickness(0, 0, 0, 2) };
+        form.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        form.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        form.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        // 【新增功能：卡片化】圆角输入框（聚焦时外层描边自动变主蓝）
+        var inputHost = BuildChromeTextBox(out _todoFormInput);
+        // 回车快速添加
+        _todoFormInput.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+            {
+                AddTodoFromForm();
+                e.Handled = true;
+            }
+        };
+        Grid.SetColumn(inputHost, 0);
+        form.Children.Add(inputHost);
+
+        // 截止日期选择器：选择年月日，默认今天
+        _todoFormDatePicker = new DatePicker
+        {
+            Width = 118,
+            Margin = new Thickness(4, 0, 0, 0),
+            SelectedDate = DateTime.Today,
+            FontSize = AppTypography.Scale(12),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Background = Brushes.Transparent,
+            BorderBrush = WeakTextBrush,
+            Foreground = TextBrush
+        };
+        // 【新增功能：蓝色主题】日期选择器聚焦时边框变主蓝（焦点边框）
+        _todoFormDatePicker.GotKeyboardFocus += (_, _) => _todoFormDatePicker.BorderBrush = Theme.AccentBrush;
+        _todoFormDatePicker.LostKeyboardFocus += (_, _) => _todoFormDatePicker.BorderBrush = WeakTextBrush;
+        Grid.SetColumn(_todoFormDatePicker, 1);
+        form.Children.Add(_todoFormDatePicker);
+
+        // 【新增功能：卡片化】圆角主蓝添加按钮（悬停变深色/亮色）
+        var addButton = BuildAccentButton("添加", "添加限时任务", AddTodoFromForm);
+        Grid.SetColumn(addButton, 2);
+        form.Children.Add(addButton);
+
+        return form;
+    }
+
+    /// <summary>【新增功能】从限时任务表单添加普通任务（名称 + 截止日期）。</summary>
+    private void AddTodoFromForm()
+    {
+        if (_todoFormInput == null)
+        {
+            return;
+        }
+
+        var text = _todoFormInput.Text.Trim();
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        var dueDate = _todoFormDatePicker?.SelectedDate;
+        var item = AddItemAfter(OrderedItems().LastOrDefault(i => !i.Done), text);
+        item.DueDate = dueDate.HasValue ? new DateTimeOffset(dueDate.Value) : null;
+        _todoFormInput.Clear();
+        _controller.MarkDirty();
+        ReconcileTodoRows(focusItemId: item.Id);
+        // 【新增功能：添加后定位可见】限时任务新行追加在列表底部，滚动到底部让用户看到新任务
+        _todoScrollViewer?.ScrollToEnd();
+    }
+
+    // ---- 【新增功能：已完成普通任务折叠区】UI 引用与状态 ----
+    private bool _showCompletedTodos;       // 折叠开关状态：false=隐藏（默认），true=展开
+    private Button? _completedToggleButton; // "查看已完成普通任务"开关按钮
+    private StackPanel? _completedPanel;    // 已完成任务列表容器
+
+    // ===== 【新增功能：已完成普通任务折叠区】默认折叠隐藏，点击开关展开/收起 =====
+    private UIElement BuildCompletedSection()
+    {
+        var section = new StackPanel { Margin = new Thickness(6.4, 2, 5.6, 2) };
+
+        // 【新增功能：蓝色主题】已完成折叠开关用主蓝，悬停浅蓝底高亮
+        _completedToggleButton = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(4, 2, 4, 2),
+            FontSize = AppTypography.Scale(12),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            Foreground = Theme.AccentBrush,
+            Cursor = Cursors.Hand
+        };
+        _completedToggleButton.MouseEnter += (_, _) => _completedToggleButton.Background = Theme.AccentSubtleBrush;
+        _completedToggleButton.MouseLeave += (_, _) => _completedToggleButton.Background = Brushes.Transparent;
+        _completedToggleButton.Click += (_, _) =>
+        {
+            _showCompletedTodos = !_showCompletedTodos;
+            RefreshCompletedSection();
+        };
+        section.Children.Add(_completedToggleButton);
+
+        _completedPanel = new StackPanel();
+        section.Children.Add(_completedPanel);
+
+        RefreshCompletedSection();
+        return section;
+    }
+
+    /// <summary>
+    /// 【新增功能】刷新已完成普通任务折叠区：更新开关文案/可见性，
+    /// 展开时重建已完成任务行（不按日期强制排序，保持原顺序）。
+    /// </summary>
+    private void RefreshCompletedSection()
+    {
+        if (_completedToggleButton == null || _completedPanel == null)
+        {
+            return;
+        }
+
+        var doneItems = _paper.Items
+            .Where(i => i.Done)
+            .OrderBy(i => i.Order)
+            .ToList();
+        var arrow = _showCompletedTodos ? "▾" : "▸";
+        _completedToggleButton.Content = $"查看已完成普通任务 {arrow}（{doneItems.Count}）";
+        _completedToggleButton.Visibility = doneItems.Count > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        _completedPanel.Children.Clear();
+        if (!_showCompletedTodos)
+        {
+            return;
+        }
+
+        foreach (var item in doneItems)
+        {
+            _completedPanel.Children.Add(BuildCompletedRow(item));
+        }
+    }
+
+    /// <summary>【新增功能】构建单条已完成普通任务行（简化行：复选框 + 删除线文本 + 删除）。</summary>
+    private UIElement BuildCompletedRow(PaperItem item)
+    {
+        var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var check = new CheckBox
+        {
+            IsChecked = true,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Cursor = Cursors.Hand,
+            Focusable = false,
+            Style = CurrentTodoCheckBoxStyle()
+        };
+        // 取消勾选 → 回到限时任务列表，参与日期排序
+        check.Unchecked += (_, _) =>
+        {
+            PushUndoSnapshot();
+            item.Done = false;
+            _controller.MarkDirty();
+            ReconcileTodoRows([item.Id]);
+            RefreshCompletedSection();
+        };
+        Grid.SetColumn(check, 0);
+        row.Children.Add(check);
+
+        var text = new TextBlock
+        {
+            Text = item.Text,
+            FontSize = AppTypography.Scale(12.5),
+            Foreground = BrightWeakTextBrush,
+            TextDecorations = TextDecorations.Strikethrough,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(2, 1, 0, 1)
+        };
+        Grid.SetColumn(text, 1);
+        row.Children.Add(text);
+
+        var deleteButton = new Button
+        {
+            Content = "✕",
+            Width = 20,
+            Height = 18,
+            FontSize = AppTypography.Scale(10),
+            Margin = new Thickness(2, 0, 0, 0),
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "删除该已完成任务",
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            Foreground = WeakTextBrush
+        };
+        deleteButton.Click += (_, _) =>
+        {
+            _paper.Items.Remove(item);
+            if (_paper.Items.Count == 0)
+            {
+                _paper.Items.Add(new PaperItem());
+            }
+            NormalizeTodoItems();
+            NormalizeOrders();
+            _controller.MarkDirty();
+            ReconcileTodoRows();
+            RefreshCompletedSection();
+        };
+        Grid.SetColumn(deleteButton, 2);
+        row.Children.Add(deleteButton);
+
+        return row;
+    }
+
+    /// <summary>
+    /// 【新增功能】跨天（每日 0 点）后由 AppController 调用：
+    /// 刷新每日任务区块（恢复未完成）、已完成区、以及普通任务的过期标红与排序。
+    /// </summary>
+    public void RefreshDailyTodoSurfacesForDayChange()
+    {
+        if (_paper.Type != PaperTypes.Todo)
+        {
+            return;
+        }
+
+        RebuildDailyTodoRows();
+        RefreshCompletedSection();
+        RebuildTodoRows(CurrentFocusedTodoItemId());
+    }
+
+    /// <summary>【新增功能】过期未完成普通任务的文字高亮色：浅色模式深红，深色模式浅红。</summary>
+    private static Brush OverdueTextBrush =>
+        Theme.IsDark
+            ? new SolidColorBrush(Color.FromRgb(0xFF, 0x8A, 0x80))
+            : new SolidColorBrush(Color.FromRgb(0xC6, 0x28, 0x28));
+
 
 
     public void RefreshTodoRowsForExternalChange()
@@ -101,6 +462,12 @@ public sealed partial class PaperWindow
 
         foreach (var item in OrderedItems())
         {
+            if (item.Done)
+            {
+                // 【新增功能】已完成普通任务折叠隐藏，不在主列表渲染（由折叠区展示）
+                continue;
+            }
+
             var row = BuildTodoRow(item, isNewItem: !existingIds.Contains(item.Id));
             _todoRows.Add(row);
             _todoPanel.Children.Add(row);
@@ -135,7 +502,10 @@ public sealed partial class PaperWindow
         _foldedTodoItemIds.IntersectWith(_paper.Items.Select(item => item.Id));
 
         var rebuildIds = rebuildItemIds?.ToHashSet(StringComparer.Ordinal) ?? [];
-        var orderedItems = OrderedItems().ToList();
+        // 【新增功能】主列表只展示未完成普通任务；已完成任务由折叠区（_completedPanel）渲染
+        var orderedItems = OrderedItems()
+            .Where(item => !item.Done)
+            .ToList();
         var itemIds = orderedItems
             .Select(item => item.Id)
             .ToHashSet(StringComparer.Ordinal);
@@ -405,7 +775,7 @@ public sealed partial class PaperWindow
 
         area.MouseLeftButtonDown += (_, e) =>
         {
-            var newItem = AddItemAfter(OrderedItems().LastOrDefault(), "");
+            var newItem = AddItemAfter(OrderedItems().LastOrDefault(i => !i.Done), "");
             _pendingFocusItemId = newItem.Id;
             ReconcileTodoRows(focusItemId: newItem.Id);
             e.Handled = true;
@@ -568,6 +938,11 @@ public sealed partial class PaperWindow
         var showTodoReminderControl = todoRemindersEnabled &&
             (showTodoReminderButton || item.ReminderAt.HasValue);
 
+        // 【新增功能】过期未完成判断：当前时间已超过截止日期 → 任务名称文字标红
+        var isOverdue = !item.Done &&
+            item.DueDate.HasValue &&
+            item.DueDate.Value < DateTimeOffset.Now;
+
         var row = new Border
         {
             Margin = new Thickness(0, 2, 0, 2),
@@ -612,6 +987,14 @@ public sealed partial class PaperWindow
         });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // 【新增功能】截止日期列（普通任务）：显示/设置截止日期的日期选择器。
+        // 【新增功能：蓝色主题】列宽显式固定 104（与 DatePicker 内容对齐），
+        // 列宽稳定不抖动；DatePicker 以 Stretch 填满该列并设 MinWidth，面板再窄也不截断。
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(104) });
+        // ===== 【新增功能：未完成普通任务可删除】行内删除按钮列 =====
+        // 未完成任务行此前只能靠右键菜单删除，用户找不到删除入口；
+        // 新增 ✕ 删除列（Auto），点击删除该任务，与每日任务行/已完成折叠区删除按钮一致。
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         if (showTodoReminderControl)
         {
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -645,7 +1028,10 @@ public sealed partial class PaperWindow
             IsDone = item.Done,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            Foreground = item.Done ? BrightWeakTextBrush : TextBrush,
+            // 【新增功能】过期未完成 → 文字标红；已完成 → 弱化文字；正常 → 正文色
+            Foreground = item.Done
+                ? BrightWeakTextBrush
+                : isOverdue ? OverdueTextBrush : TextBrush,
             CaretBrush = TextBrush,
             FontFamily = AppTypography.FontFamilyFor(content: true, bold: _controller.State.TodoTextBold),
             FontSize = metrics.TextFontSize,
@@ -735,6 +1121,7 @@ public sealed partial class PaperWindow
             text.Foreground = BrightWeakTextBrush;
             foldPreview.SetDone(true);
             _controller.MarkDirty();
+            RefreshCompletedSection();   // 【新增功能】勾选完成 → 移入已完成折叠区
 
             if (_controller.State.AutoClearCompletedTodos)
             {
@@ -742,17 +1129,11 @@ public sealed partial class PaperWindow
                 return;
             }
 
-            if (MoveTodoItemsAfterDoneChange([item], done: true))
-            {
-                ReconcileTodoRows([item.Id]);
-                return;
-            }
-
-            // 完成动画：只淡化，不缩小
-            if (_controller.State.EnableAnimations)
-            {
-                AnimationHelper.FadeTo(row, 0.75, 200, AnimationHelper.QuickEase);
-            }
+            // 【新增功能】勾选完成后始终从主列表移除（进入已完成折叠区），
+            // 不再受原"自动移到底部"设置限制；取消勾选时再回到限时列表参与日期排序。
+            MoveTodoItemsAfterDoneChange([item], done: true);
+            ReconcileTodoRows([item.Id]);
+            return;
         };
 
         check.Unchecked += (_, _) =>
@@ -778,6 +1159,7 @@ public sealed partial class PaperWindow
             text.Foreground = TextBrush;
             foldPreview.SetDone(false);
             _controller.MarkDirty();
+            RefreshCompletedSection();   // 【新增功能】取消勾选 → 移出已完成折叠区，回到限时列表参与日期排序
 
             if (MoveTodoItemsAfterDoneChange([item], done: false))
             {
@@ -974,8 +1356,8 @@ public sealed partial class PaperWindow
             var linkGlyph = new TextBlock
             {
                 Text = linkedPaperButtonText,
-                Foreground = linkedPaperActive ? LinkedPaperActiveTextBrush : WeakTextBrush,
-                Opacity = linkedPaperActive ? 1.0 : 0.72,
+                Foreground = linkedPaperActive ? Theme.AccentBrush : Theme.AccentWeakBrush,   // 【新增功能：蓝色主题】链接按钮：激活/悬停主蓝、非激活淡蓝
+                Opacity = linkedPaperActive ? 1.0 : 0.85,
                 FontFamily = showLinkedPaperName
                     ? AppTypography.UiFontFamily
                     : runLinkedScriptOnClick ? new FontFamily("Segoe UI Symbol") : new FontFamily("Segoe MDL2 Assets"),
@@ -1072,8 +1454,8 @@ public sealed partial class PaperWindow
                     ? hovered ? LinkedPaperMediumBgBrush : LinkedPaperLightBgBrush
                     : hovered ? LinkedPaperLightBgBrush : LinkedPaperNormalBgBrush;
                 linkGlyph.Foreground = linkedPaperActive
-                    ? LinkedPaperActiveTextBrush : hovered ? TextBrush : WeakTextBrush;
-                linkGlyph.Opacity = linkedPaperActive || hovered ? 1.0 : 0.72;
+                    ? Theme.AccentBrush : hovered ? Theme.AccentHoverBrush : Theme.AccentWeakBrush;   // 【新增功能：蓝色主题】链接按钮蓝
+                linkGlyph.Opacity = linkedPaperActive || hovered ? 1.0 : 0.85;
 
                 var runScript = _controller.ShouldRunLinkedScriptCapsule(item.LinkedPaperId);
                 if (linkedPaperTitle == refreshedTitle && runLinkedScriptOnClick == runScript)
@@ -1151,6 +1533,158 @@ public sealed partial class PaperWindow
             grid.Children.Add(linkButton);
         }
 
+        // ===== 【新增功能：普通任务截止日期列】行内日期选择器 =====
+        // 未设置截止日期时显示为空，可点击选择年月日；修改后按新日期重新参与排序。
+        // 【新增功能：蓝色主题】次要控件弱化：边框弱色、聚焦时主蓝（焦点边框）；
+        // 宽度自适应：列固定 104，控件 Stretch 填满 + MinWidth 保障，不截断。
+        var dueDatePicker = new DatePicker
+        {
+            SelectedDate = item.DueDate?.LocalDateTime.Date,
+            MinWidth = 76,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Height = Math.Max(20, metrics.TextFontSize + 8),
+            Margin = new Thickness(2, 0, 0, 0),
+            FontSize = Math.Max(10, metrics.TextFontSize - 1),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Background = Brushes.Transparent,
+            BorderBrush = WeakTextBrush,
+            Foreground = TextBrush,
+            ToolTip = "设置截止日期"
+        };
+        dueDatePicker.GotKeyboardFocus += (_, _) => dueDatePicker.BorderBrush = Theme.AccentBrush;
+        dueDatePicker.LostKeyboardFocus += (_, _) => dueDatePicker.BorderBrush = WeakTextBrush;
+        dueDatePicker.SelectedDateChanged += (_, _) =>
+        {
+            var selected = dueDatePicker.SelectedDate;
+            var newDue = selected.HasValue ? new DateTimeOffset(selected.Value) : (DateTimeOffset?)null;
+            if (item.DueDate != newDue)
+            {
+                item.DueDate = newDue;
+                _controller.MarkDirty();
+                InvalidateEdgeCapsulePreviewContent();
+                // 截止日期变化可能影响排序（未完成按截止日期升序）→ 重建该行
+                ReconcileTodoRows([item.Id]);
+            }
+        };
+        Grid.SetColumn(dueDatePicker, 3);
+        grid.Children.Add(dueDatePicker);
+
+        // ===== 【新增功能：任务备注】备注编辑框（行内第二行，默认折叠）=====
+        // 点击行内备注图标展开/收起；展开时聚焦，收起/失焦时保存到 item.Notes（空则置 null）。
+        // 胶囊小窗口不渲染备注，备注只在展开面板可见。
+        var notesBox = new TextBox
+        {
+            Visibility = Visibility.Collapsed,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MinHeight = 38,
+            MaxHeight = 90,
+            Margin = new Thickness(26, 2, 24, 2),
+            Padding = new Thickness(4, 2, 4, 2),
+            FontSize = AppTypography.Scale(11.5),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalContentAlignment = VerticalAlignment.Top,
+            Background = Theme.TodoPaperBrush,
+            BorderBrush = WeakTextBrush,
+            BorderThickness = new Thickness(1),
+            Foreground = TextBrush,
+            CaretBrush = TextBrush,
+            ToolTip = "任务备注（不会显示在胶囊小窗口）"
+        };
+        notesBox.GotKeyboardFocus += (_, _) => notesBox.BorderBrush = Theme.AccentBrush;
+        notesBox.LostKeyboardFocus += (_, _) =>
+        {
+            notesBox.BorderBrush = WeakTextBrush;
+            if (notesBox.Visibility == Visibility.Visible)
+            {
+                var trimmed = notesBox.Text.Trim();
+                if (!string.Equals(trimmed, item.Notes ?? "", StringComparison.Ordinal))
+                {
+                    item.Notes = trimmed.Length == 0 ? null : trimmed;
+                    _controller.MarkDirty();
+                }
+            }
+        };
+
+        // ===== 【新增功能：未完成普通任务可删除】行内删除按钮 =====
+        // 点击删除该任务（复用 RemoveItem 完整删除链路：保存/重建/撤销栈）；
+        // 样式与每日任务行一致：弱化文字、默认半透明 0.55、行悬停恢复清晰，
+        // 不抢任务名称与截止日期两个视觉重点。
+        var deleteButton = new Button
+        {
+            Content = "✕",
+            Width = 20,
+            Height = 18,
+            FontSize = AppTypography.Scale(10),
+            Margin = new Thickness(2, 0, 0, 0),
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "删除该任务",
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            Foreground = WeakTextBrush,
+            Opacity = 0.55
+        };
+        // 【新增功能：卡片化】次要控件弱化：悬停按钮本身时恢复清晰（与每日任务行删除按钮一致）
+        deleteButton.MouseEnter += (_, _) => deleteButton.Opacity = 1.0;
+        deleteButton.MouseLeave += (_, _) => deleteButton.Opacity = 0.55;
+        deleteButton.Click += (_, _) => RemoveItem(item);
+
+        // ===== 【新增功能：任务备注】行内备注图标按钮 =====
+        // 无备注时弱化（0.55，悬停恢复）；有备注时主蓝高亮常显。
+        // 点击展开/收起行内备注编辑框（展开时载入当前备注并聚焦）。
+        var notesButton = new Button
+        {
+            Content = "✎",
+            Width = 20,
+            Height = 18,
+            FontSize = AppTypography.Scale(10),
+            Margin = new Thickness(2, 0, 0, 0),
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = "备注",
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent
+        };
+        if (!string.IsNullOrWhiteSpace(item.Notes))
+        {
+            notesButton.Foreground = Theme.AccentBrush;   // 有备注 → 主蓝高亮
+            notesButton.Opacity = 1.0;
+        }
+        else
+        {
+            notesButton.Foreground = WeakTextBrush;       // 无备注 → 弱化
+            notesButton.Opacity = 0.55;
+        }
+        notesButton.MouseEnter += (_, _) => notesButton.Opacity = 1.0;
+        notesButton.MouseLeave += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(item.Notes))
+            {
+                notesButton.Opacity = 0.55;
+            }
+        };
+        notesButton.Click += (_, _) =>
+        {
+            if (notesBox.Visibility != Visibility.Visible)
+            {
+                notesBox.Text = item.Notes ?? "";
+                notesBox.Visibility = Visibility.Visible;
+                notesBox.Focus();
+            }
+            else
+            {
+                notesBox.Visibility = Visibility.Collapsed;   // 收起（内容已在 LostFocus 时保存）
+            }
+        };
+
+        // 备注按钮 + 删除按钮 合并放入操作列（列 4）
+        var actionStack = new StackPanel { Orientation = Orientation.Horizontal };
+        actionStack.Children.Add(notesButton);
+        actionStack.Children.Add(deleteButton);
+        Grid.SetColumn(actionStack, 4);
+        grid.Children.Add(actionStack);
+
         if (showTodoReminderControl)
         {
             var reminderHost = new Grid();
@@ -1171,7 +1705,7 @@ public sealed partial class PaperWindow
                 reminderHost.Children.Add(reminderCountdown);
             }
 
-            Grid.SetColumn(reminderHost, 3);
+            Grid.SetColumn(reminderHost, 5);   // 【新增功能】删除列插入后提醒列后移一位（4→5）
             grid.Children.Add(reminderHost);
         }
 
@@ -1363,10 +1897,20 @@ public sealed partial class PaperWindow
         };
         text.LostKeyboardFocus += (_, _) => QueueFoldRefresh();
 
-        Grid.SetColumn(trailingControls, showTodoReminderControl ? 4 : 3);
+        Grid.SetColumn(trailingControls, showTodoReminderControl ? 6 : 5);   // 【新增功能】删除列插入后尾列后移一位
         grid.Children.Add(trailingControls);
 
-        row.Child = grid;
+        // ===== 【新增功能：任务备注】行主体（grid）与备注编辑框（notesBox）纵向叠加 =====
+        // 行悬停/选择背景（row.Background）作用于整个行，备注区展开时也保持同一底色。
+        var contentGrid = new Grid();
+        contentGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        contentGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(grid, 0);
+        contentGrid.Children.Add(grid);
+        Grid.SetRow(notesBox, 1);
+        contentGrid.Children.Add(notesBox);
+
+        row.Child = contentGrid;
         ConfigureTodoPathDrop(row, item);
         ConfigureTodoMultiSelection(row, item, check, text);
 
@@ -1738,6 +2282,7 @@ public sealed partial class PaperWindow
                     if (rebuild && animationGeneration == _todoRowsGeneration)
                     {
                         ReconcileTodoRows(focusItemId: fallbackFocus);
+                        RefreshCompletedSection();   // 【新增功能】删除后同步刷新已完成折叠区
                     }
                 };
 
@@ -1766,6 +2311,7 @@ public sealed partial class PaperWindow
         if (rebuild)
         {
             ReconcileTodoRows(focusItemId: fallbackFocus);
+            RefreshCompletedSection();   // 【新增功能】删除后同步刷新已完成折叠区
         }
     }
 
@@ -1887,6 +2433,7 @@ public sealed partial class PaperWindow
                         rowGeneration == _todoRowsGeneration)
                     {
                         ReconcileTodoRows(focusItemId: focus);
+                        RefreshCompletedSection();   // 【新增功能】清空已完成后同步刷新折叠区
                     }
                 };
                 finalizeTimer.Start();
@@ -1895,6 +2442,7 @@ public sealed partial class PaperWindow
         }
 
         ReconcileTodoRows(focusItemId: focus);
+        RefreshCompletedSection();   // 【新增功能】清空已完成后同步刷新折叠区
     }
 
     private void RefreshCapsuleEligibilityForLinkedPapers(IEnumerable<string?> paperIds)
@@ -2079,14 +2627,16 @@ public sealed partial class PaperWindow
 
     private PaperItem? PreviousItem(PaperItem item)
     {
-        var ordered = OrderedItems().ToList();
+        // 【新增功能】键盘导航跳过已完成任务（已完成任务不在主列表渲染）
+        var ordered = OrderedItems().Where(i => !i.Done).ToList();
         var index = ordered.FindIndex(i => i.Id == item.Id);
         return index > 0 ? ordered[index - 1] : null;
     }
 
     private PaperItem? NextItem(PaperItem item)
     {
-        var ordered = OrderedItems().ToList();
+        // 【新增功能】键盘导航跳过已完成任务
+        var ordered = OrderedItems().Where(i => !i.Done).ToList();
         var index = ordered.FindIndex(i => i.Id == item.Id);
         return index >= 0 && index < ordered.Count - 1 ? ordered[index + 1] : null;
     }
@@ -2490,7 +3040,16 @@ public sealed partial class PaperWindow
 
     private IEnumerable<PaperItem> OrderedItems()
     {
-        return _paper.Items.OrderBy(i => i.Order).ToList();
+        // ===== 【新增功能】列表排序规则 =====
+        // 1) 未完成普通任务在前，按截止日期升序：截止越早越靠上；
+        //    未设置截止日期的任务排在最后（DueDate 为 null 视作无穷大）。
+        // 2) 已完成普通任务排在最后（折叠区内不强制按日期排序，保持原顺序）。
+        // 3) 同排序键的任务以原有 Order（拖拽顺序）为次级稳定排序。
+        return _paper.Items
+            .OrderBy(i => i.Done)
+            .ThenBy(i => i.DueDate ?? DateTimeOffset.MaxValue)
+            .ThenBy(i => i.Order)
+            .ToList();
     }
 
     private void NormalizeTodoItems()

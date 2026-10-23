@@ -219,10 +219,11 @@ public sealed partial class PaperWindow
             new EdgeCapsulePreviewThemeResources(
                 Theme.LinkBrush,
                 CheckBoxBorderBrush,
-                Theme.ActiveBrush,
-                Theme.CheckBoxHoverBorderBrush,
-                Theme.CheckBoxUncheckedHoverBgBrush,
-                Theme.CheckBoxActiveHoverBrush));
+                // 【新增功能：蓝色主题】胶囊预览复选框与面板一致：选中态主蓝、悬停主蓝系
+                Theme.AccentBrush,
+                Theme.AccentHoverBrush,
+                Theme.AccentSubtleBrush,
+                Theme.AccentHoverBrush));
     }
 
     public void UpdateEdgeCapsuleCloseButtonMode()

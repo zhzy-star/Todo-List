@@ -266,6 +266,68 @@ public static class Theme
     public static Brush CheckBoxActiveHoverBrush => Solid(Darken(Current.Active, 0.12));
     public static Brush CheckBoxUncheckedHoverBgBrush => Tint(20);
 
+    // ===== 【新增功能：待办面板蓝色强调色板】=====
+    // 双主题蓝色色板（不随 ColorScheme 配色族变化），每日任务/限时任务区块统一使用：
+    //   浅色：主蓝 #2563EB、悬停 #1D4ED8、浅蓝底 #E8F0FE
+    //   深色：主蓝 #5B9BFF、悬停 #93C5FD、浅蓝底 #1E3A5F
+    // 主蓝用作区块标题、添加按钮、复选框选中态、焦点边框、选中/悬停高亮、
+    // 链接按钮、已完成折叠开关；浅蓝底用作行悬停/未选勾选框悬停底。
+    private static readonly Color AccentColorLight = Color.FromRgb(0x25, 0x63, 0xEB);
+    private static readonly Color AccentColorDark = Color.FromRgb(0x5B, 0x9B, 0xFF);
+    private static readonly Color AccentHoverColorLight = Color.FromRgb(0x1D, 0x4E, 0xD8);
+    private static readonly Color AccentHoverColorDark = Color.FromRgb(0x93, 0xC5, 0xFD);
+    private static readonly Color AccentSubtleColorLight = Color.FromRgb(0xE8, 0xF0, 0xFE);
+    private static readonly Color AccentSubtleColorDark = Color.FromRgb(0x1E, 0x3A, 0x5F);
+
+    /// <summary>主蓝：区块标题、添加按钮底、复选框选中态、焦点边框、链接按钮、已完成折叠开关。</summary>
+    public static Brush AccentBrush => Solid(IsDark ? AccentColorDark : AccentColorLight);
+
+    /// <summary>主蓝悬停态（悬停变深/变亮）。</summary>
+    public static Brush AccentHoverBrush => Solid(IsDark ? AccentHoverColorDark : AccentHoverColorLight);
+
+    /// <summary>浅蓝底：行悬停、未选勾选框悬停底、区块分隔线。</summary>
+    public static Brush AccentSubtleBrush => Solid(IsDark ? AccentSubtleColorDark : AccentSubtleColorLight);
+
+    /// <summary>主蓝按钮前景：浅色主题白字（主蓝上），深色主题深蓝字（亮主蓝上）。</summary>
+    public static Brush AccentForegroundBrush =>
+        Solid(IsDark ? Color.FromRgb(0x0E, 0x22, 0x3E) : Color.FromRgb(0xFF, 0xFF, 0xFF));
+
+    /// <summary>主蓝弱化版：非激活链接按钮、次要蓝色元素（与弱文字混合，饱和度降低）。</summary>
+    public static Brush AccentWeakBrush =>
+        Solid(IsDark
+            ? Mix(AccentColorDark, Current.WeakText, 0.30)
+            : Mix(AccentColorLight, Current.WeakText, 0.30));
+
+    // ===== 【新增功能：待办面板卡片化画刷（方案A+B混搭·极简浅蓝+白）】=====
+    // 每日任务/限时任务两个区块各自包成一张圆角卡片：
+    //   浅色：浅蓝卡片底 #E8F0FE + 清晰淡蓝描边 #C3D6F4（白纸面上"蓝框"一眼可辨）；
+    //   深色：深蓝灰卡片底 #1B2740 + 淡蓝描边 #37527D。
+    // 卡片内不再画分隔线，靠内边距与留白分区（Todoist 式极简）。
+    // 行悬停色（RowHoverBrush）比卡片底更深一档，保证悬停反馈可辨。
+    private static readonly Color CardColorLight = Color.FromRgb(0xE8, 0xF0, 0xFE);
+    private static readonly Color CardBorderColorLight = Color.FromRgb(0xC3, 0xD6, 0xF4);
+    private static readonly Color CardColorDark = Color.FromRgb(0x1B, 0x27, 0x40);
+    private static readonly Color CardBorderColorDark = Color.FromRgb(0x37, 0x52, 0x7D);
+    private static readonly Color RowHoverColorLight = Color.FromRgb(0xD8, 0xE6, 0xFB);
+    private static readonly Color RowHoverColorDark = Color.FromRgb(0x28, 0x47, 0x6E);
+
+    /// <summary>卡片底：浅色浅蓝（与浅蓝底同系），深色深蓝灰（比纸面深，拉开层级）。</summary>
+    public static Brush CardBrush => Solid(IsDark ? CardColorDark : CardColorLight);
+
+    /// <summary>卡片描边：1px 淡蓝（浅色 #C3D6F4，深色 #37527D）。</summary>
+    public static Brush CardBorderBrush => Solid(IsDark ? CardBorderColorDark : CardBorderColorLight);
+
+    /// <summary>任务行悬停底：比卡片底更深一档的浅蓝（浅色 #D8E6FB，深色 #28476E）。</summary>
+    public static Brush RowHoverBrush => Solid(IsDark ? RowHoverColorDark : RowHoverColorLight);
+
+    // 【新增功能：卡片化】待办面板纸面（极简浅蓝+白）：Todo 纸片窗口不再用暖色纸皮肤，
+    // 纸面改用纯白（浅色）/ 深蓝黑（深色 #141A28），与 warm 色板白纸黑字保持一致。
+    private static readonly Color TodoPaperColorLight = Color.FromRgb(0xFF, 0xFF, 0xFF);
+    private static readonly Color TodoPaperColorDark = Color.FromRgb(0x14, 0x1A, 0x28);
+
+    /// <summary>Todo 纸片专用纸面：浅色纯白，深色深蓝黑。</summary>
+    public static Brush TodoPaperBrush => Solid(IsDark ? TodoPaperColorDark : TodoPaperColorLight);
+
     private static SolidColorBrush Solid(Color c)
     {
         uint key = ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
@@ -317,35 +379,36 @@ public static class Theme
                     Danger = Color.FromRgb(255, 151, 155)
                 }),
 
-            // 暖纸 — 经典奶白纸张焕新：去掉旧版偏冷的紫蓝链接，换暖陶土；弱文字略降饱和。
+            // 暖纸 — 二开定制：纸皮肤改「白纸黑字 + 蓝调」，去除奶黄纸面与棕字；
+            // 浅色：纯白纸 #FFFFFF + 淡蓝描边，正文纯黑；深色：深蓝黑纸 + 浅蓝白字。
             [ColorSchemes.Warm] = (
                 new Palette
                 {
-                    Paper = Color.FromRgb(255, 249, 234),
-                    PaperBorder = Color.FromRgb(224, 206, 167),
-                    Text = Color.FromRgb(51, 41, 30),
-                    WeakText = Color.FromRgb(138, 122, 99),
-                    Active = Color.FromRgb(140, 115, 80),
-                    Code = Color.FromRgb(247, 237, 210),
-                    QuoteBorder = Color.FromRgb(212, 190, 146),
-                    Link = Color.FromRgb(176, 98, 66),
-                    CheckBox = Color.FromRgb(180, 160, 120),
-                    Tint = Color.FromRgb(120, 92, 48),
-                    Danger = Color.FromRgb(176, 90, 70),
+                    Paper = Color.FromRgb(255, 255, 255),
+                    PaperBorder = Color.FromRgb(201, 214, 234),
+                    Text = Color.FromRgb(17, 17, 17),
+                    WeakText = Color.FromRgb(107, 118, 134),
+                    Active = Color.FromRgb(37, 99, 235),
+                    Code = Color.FromRgb(242, 246, 253),
+                    QuoteBorder = Color.FromRgb(201, 214, 234),
+                    Link = Color.FromRgb(37, 99, 235),
+                    CheckBox = Color.FromRgb(148, 163, 196),
+                    Tint = Color.FromRgb(203, 214, 240),
+                    Danger = Color.FromRgb(192, 57, 43),
                 },
                 new Palette
                 {
-                    Paper = Color.FromRgb(33, 31, 28),
-                    PaperBorder = Color.FromRgb(76, 69, 61),
-                    Text = Color.FromRgb(231, 224, 212),
-                    WeakText = Color.FromRgb(146, 137, 123),
-                    Active = Color.FromRgb(168, 142, 106),
-                    Code = Color.FromRgb(45, 42, 38),
-                    QuoteBorder = Color.FromRgb(94, 86, 75),
-                    Link = Color.FromRgb(214, 150, 120),
-                    CheckBox = Color.FromRgb(110, 100, 85),
-                    Tint = Color.FromRgb(230, 223, 211),
-                    Danger = Color.FromRgb(230, 110, 90),
+                    Paper = Color.FromRgb(20, 26, 40),
+                    PaperBorder = Color.FromRgb(55, 82, 125),
+                    Text = Color.FromRgb(232, 238, 248),
+                    WeakText = Color.FromRgb(138, 151, 173),
+                    Active = Color.FromRgb(91, 155, 255),
+                    Code = Color.FromRgb(27, 39, 64),
+                    QuoteBorder = Color.FromRgb(55, 82, 125),
+                    Link = Color.FromRgb(124, 176, 255),
+                    CheckBox = Color.FromRgb(100, 116, 139),
+                    Tint = Color.FromRgb(42, 58, 92),
+                    Danger = Color.FromRgb(255, 138, 128),
                 }),
 
             // 墨 — 冷调中性灰白，沉静专业，链接用经典墨蓝。
